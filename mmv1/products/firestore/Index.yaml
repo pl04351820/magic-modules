@@ -105,6 +105,7 @@ properties:
     values:
       - :ANY_API
       - :DATASTORE_MODE_API
+    ignore_read: true
   - !ruby/object:Api::Type::Array
     name: fields
     description: |
