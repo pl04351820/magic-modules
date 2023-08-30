@@ -4,10 +4,7 @@ resource "google_firestore_index" "<%= ctx[:primary_resource_id] %>" {
   collection = "chatrooms"
 
   query_scope = "COLLECTION_RECURSIVE"
-<<<<<<< HEAD
 
-=======
->>>>>>> 0f4e72e5977574a1143eb6b21f205da4879726ca
   api_scope = "DATASTORE_MODE_API"
 
   fields {
