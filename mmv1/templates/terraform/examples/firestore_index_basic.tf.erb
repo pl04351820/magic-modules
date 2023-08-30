@@ -3,8 +3,6 @@ resource "google_firestore_index" "<%= ctx[:primary_resource_id] %>" {
 
   collection = "chatrooms"
 
-  api_scope = "ANY_API"
-
   fields {
     field_path = "name"
     order      = "ASCENDING"
