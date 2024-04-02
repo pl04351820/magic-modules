@@ -443,6 +443,35 @@ func BootstrapSharedTestGlobalAddress(t *testing.T, testId string, params ...fun
 	return address.Name
 }
 
+type ServiceNetworkSettings struct {
+	PrefixLength  int
+	ParentService string
+}
+
+func ServiceNetworkWithPrefixLength(prefixLength int) func(*ServiceNetworkSettings) {
+	return func(settings *ServiceNetworkSettings) {
+		settings.PrefixLength = prefixLength
+	}
+}
+
+func ServiceNetworkWithParentService(parentService string) func(*ServiceNetworkSettings) {
+	return func(settings *ServiceNetworkSettings) {
+		settings.ParentService = parentService
+	}
+}
+
+func NewServiceNetworkSettings(options ...func(*ServiceNetworkSettings)) *ServiceNetworkSettings {
+	settings := &ServiceNetworkSettings{
+		PrefixLength:  16,                                 // default prefix length
+		ParentService: "servicenetworking.googleapis.com", // default parent service
+	}
+
+	for _, o := range options {
+		o(settings)
+	}
+	return settings
+}
+
 // BootstrapSharedServiceNetworkingConnection will create a shared network
 // if it hasn't been created in the test project, a global address
 // if it hasn't been created in the test project, and a service networking connection
@@ -461,8 +490,9 @@ func BootstrapSharedTestGlobalAddress(t *testing.T, testId string, params ...fun
 // https://cloud.google.com/vpc/docs/configure-private-services-access#removing-connection
 //
 // testId specifies the test for which a shared network and a gobal address are used/initialized.
-func BootstrapSharedServiceNetworkingConnection(t *testing.T, testId string, params ...func(*AddressSettings)) string {
-	parentService := "services/servicenetworking.googleapis.com"
+func BootstrapSharedServiceNetworkingConnection(t *testing.T, testId string, params ...func(*ServiceNetworkSettings)) string {
+	settings := NewServiceNetworkSettings(params...)
+	parentService := "services/" + settings.ParentService
 	projectId := envvar.GetTestProjectFromEnv()
 
 	config := BootstrapConfig(t)
@@ -479,7 +509,7 @@ func BootstrapSharedServiceNetworkingConnection(t *testing.T, testId string, par
 
 	networkName := SharedTestNetworkPrefix + testId
 	networkId := fmt.Sprintf("projects/%v/global/networks/%v", project.ProjectNumber, networkName)
-	globalAddressName := BootstrapSharedTestGlobalAddress(t, testId, params...)
+	globalAddressName := BootstrapSharedTestGlobalAddress(t, testId, AddressWithPrefixLength(settings.PrefixLength))
 
 	readCall := config.NewServiceNetworkingClient(config.UserAgent).Services.Connections.List(parentService).Network(networkId)
 	if config.UserProjectOverride {
@@ -579,65 +609,6 @@ func BootstrapServicePerimeterProjects(t *testing.T, desiredProjects int) []*clo
 	}
 
 	return projects
-}
-
-func RemoveContainerServiceAgentRoleFromContainerEngineRobot(t *testing.T, project *cloudresourcemanager.Project) {
-	config := BootstrapConfig(t)
-	if config == nil {
-		return
-	}
-
-	client := config.NewResourceManagerClient(config.UserAgent)
-	containerEngineRobot := fmt.Sprintf("serviceAccount:service-%d@container-engine-robot.iam.gserviceaccount.com", project.ProjectNumber)
-	getPolicyRequest := &cloudresourcemanager.GetIamPolicyRequest{}
-	policy, err := client.Projects.GetIamPolicy(project.ProjectId, getPolicyRequest).Do()
-	if err != nil {
-		t.Fatalf("error getting project iam policy: %v", err)
-	}
-	roleFound := false
-	changed := false
-	for _, binding := range policy.Bindings {
-		if binding.Role == "roles/container.serviceAgent" {
-			memberFound := false
-			for i, member := range binding.Members {
-				if member == containerEngineRobot {
-					binding.Members[i] = binding.Members[len(binding.Members)-1]
-					memberFound = true
-				}
-			}
-			if memberFound {
-				binding.Members = binding.Members[:len(binding.Members)-1]
-				changed = true
-			}
-		} else if binding.Role == "roles/editor" {
-			memberFound := false
-			for _, member := range binding.Members {
-				if member == containerEngineRobot {
-					memberFound = true
-					break
-				}
-			}
-			if !memberFound {
-				binding.Members = append(binding.Members, containerEngineRobot)
-				changed = true
-			}
-			roleFound = true
-		}
-	}
-	if !roleFound {
-		policy.Bindings = append(policy.Bindings, &cloudresourcemanager.Binding{
-			Members: []string{containerEngineRobot},
-			Role:    "roles/editor",
-		})
-		changed = true
-	}
-	if changed {
-		setPolicyRequest := &cloudresourcemanager.SetIamPolicyRequest{Policy: policy}
-		policy, err = client.Projects.SetIamPolicy(project.ProjectId, setPolicyRequest).Do()
-		if err != nil {
-			t.Fatalf("error setting project iam policy: %v", err)
-		}
-	}
 }
 
 // BootstrapProject will create or get a project named
@@ -1056,6 +1027,79 @@ func BootstrapNetworkAttachment(t *testing.T, networkAttachmentName string, subn
 	}
 
 	return networkAttachment.Name
+}
+
+// The default network within GCP already comes pre configured with
+// certain firewall rules open to allow internal communication. As we
+// are boostrapping a network for dataproc tests, we need to additionally
+// open up similar rules to allow the nodes to talk to each other
+// internally as part of their configuration or this will just hang.
+const SharedTestFirewallPrefix = "tf-bootstrap-firewall-"
+
+func BootstrapFirewallForDataprocSharedNetwork(t *testing.T, firewallName string, networkName string) string {
+	project := envvar.GetTestProjectFromEnv()
+	firewallName = SharedTestFirewallPrefix + firewallName
+
+	config := BootstrapConfig(t)
+	if config == nil {
+		return ""
+	}
+
+	log.Printf("[DEBUG] Getting Firewall %q for Network %q", firewallName, networkName)
+	_, err := config.NewComputeClient(config.UserAgent).Firewalls.Get(project, firewallName).Do()
+	if err != nil && transport_tpg.IsGoogleApiErrorWithCode(err, 404) {
+		log.Printf("[DEBUG] firewallName %q not found, bootstrapping", firewallName)
+		url := fmt.Sprintf("%sprojects/%s/global/firewalls", config.ComputeBasePath, project)
+
+		networkId := fmt.Sprintf("projects/%s/global/networks/%s", project, networkName)
+		allowObj := []interface{}{
+			map[string]interface{}{
+				"IPProtocol": "icmp",
+			},
+			map[string]interface{}{
+				"IPProtocol": "tcp",
+				"ports":      []string{"0-65535"},
+			},
+			map[string]interface{}{
+				"IPProtocol": "udp",
+				"ports":      []string{"0-65535"},
+			},
+		}
+
+		firewallObj := map[string]interface{}{
+			"name":    firewallName,
+			"network": networkId,
+			"allowed": allowObj,
+		}
+
+		res, err := transport_tpg.SendRequest(transport_tpg.SendRequestOptions{
+			Config:    config,
+			Method:    "POST",
+			Project:   project,
+			RawURL:    url,
+			UserAgent: config.UserAgent,
+			Body:      firewallObj,
+			Timeout:   4 * time.Minute,
+		})
+		if err != nil {
+			t.Fatalf("Error bootstrapping Firewall %q for Network %q: %s", firewallName, networkName, err)
+		}
+
+		log.Printf("[DEBUG] Waiting for Firewall creation to finish")
+		err = tpgcompute.ComputeOperationWaitTime(config, res, project, "Error bootstrapping Firewall", config.UserAgent, 4*time.Minute)
+		if err != nil {
+			t.Fatalf("Error bootstrapping Firewall %q: %s", firewallName, err)
+		}
+	}
+
+	firewall, err := config.NewComputeClient(config.UserAgent).Firewalls.Get(project, firewallName).Do()
+	if err != nil {
+		t.Errorf("Error getting Firewall %q: %s", firewallName, err)
+	}
+	if firewall == nil {
+		t.Fatalf("Error getting Firewall %q: is nil", firewallName)
+	}
+	return firewall.Name
 }
 
 func SetupProjectsAndGetAccessToken(org, billing, pid, service string, config *transport_tpg.Config) (string, error) {
