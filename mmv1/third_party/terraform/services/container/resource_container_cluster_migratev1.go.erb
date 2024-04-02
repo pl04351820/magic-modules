@@ -996,6 +996,11 @@ func resourceContainerClusterResourceV1() *schema.Resource {
 										Required:    true,
 										Description: `Whether or not the advanced datapath metrics are enabled.`,
 									},
+									"enable_relay": {
+										Type:        schema.TypeBool,
+										Optional:    true,
+										Description: `Whether or not Relay is enabled.`,
+									},
 									"relay_mode": {
 										Type:         schema.TypeString,
 										Optional:     true,
@@ -1793,7 +1798,6 @@ func resourceContainerClusterResourceV1() *schema.Resource {
 				Type:        schema.TypeList,
 				Optional:    true,
 				MaxItems:    1,
-				ForceNew:    true,
 				DiffSuppressFunc: suppressDiffForAutopilot,
 				Description: `Configuration for Cloud DNS for Kubernetes Engine.`,
 				Elem: &schema.Resource{
